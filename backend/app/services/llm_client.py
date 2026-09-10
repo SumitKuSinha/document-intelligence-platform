@@ -8,9 +8,12 @@ Provides dependency injection / mock hooks for offline unit testing without real
 """
 
 import json
+import logging
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from dotenv import load_dotenv
 
@@ -53,17 +56,17 @@ class LLMClient:
     Supports Google Gemini 2.5 Flash (default) and OpenAI-compatible backends.
     """
 
-    _mock_responder: Optional[Callable[[str, str], Dict[str, Any]]] = None
+    _mock_responder: Optional[Callable[..., Dict[str, Any]]] = None
 
     @classmethod
     def set_mock_responder(
-        cls, responder: Optional[Callable[[str, str], Dict[str, Any]]]
+        cls, responder: Optional[Callable[..., Dict[str, Any]]]
     ) -> None:
         """
         Inject a mock responder callable for unit tests.
 
         Args:
-            responder: Callable taking (system_prompt, user_prompt) and returning a dict or JSON string,
+            responder: Callable taking (system_prompt, user_prompt, [image_parts]) and returning a dict or JSON string,
                        or None to restore live API calls.
         """
         cls._mock_responder = responder
@@ -75,10 +78,10 @@ class LLMClient:
 
     @classmethod
     def get_model(cls) -> str:
-        """Return the configured model name (default: 'gemini-2.5-flash')."""
+        """Return the configured model name (default: 'gemini-3.6-flash')."""
         provider = cls.get_provider()
         if provider == "gemini":
-            return os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL", "gemini-2.5-flash")
+            return os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL", "gemini-3.6-flash")
         return os.getenv("LLM_MODEL", "gpt-4o-mini")
 
     @classmethod
@@ -151,8 +154,9 @@ class LLMClient:
         cls,
         system_prompt: str,
         user_prompt: str,
+        image_parts: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """Generate structured JSON using Google Gemini 2.5 Flash via google-genai."""
+        """Generate structured JSON using Google Gemini via google-genai, supporting multimodal images."""
         client = cls._create_gemini_client()
         model_name = cls.get_model()
         temperature = cls.get_temperature()
@@ -163,11 +167,63 @@ class LLMClient:
                 response_mime_type="application/json",
                 temperature=temperature,
             )
-            response = client.models.generate_content(
-                model=model_name,
-                contents=user_prompt,
-                config=config,
-            )
+
+            if image_parts:
+                contents: List[Any] = []
+                for img in image_parts:
+                    img_data = img.get("data")
+                    mime = img.get("mime_type") or "image/jpeg"
+                    if img_data:
+                        contents.append(genai_types.Part.from_bytes(data=img_data, mime_type=mime))
+                contents.append(user_prompt)
+            else:
+                contents = user_prompt
+
+            # Resilient multi-model retry loop for transient demand spikes (503 / 429)
+            model_candidates = [model_name]
+            for fallback in ["gemini-3.7-flash", "gemini-3.5-flash"]:
+                if fallback not in model_candidates:
+                    model_candidates.append(fallback)
+
+            response = None
+            last_exc = None
+
+            for active_model in model_candidates:
+                max_attempts = 3
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        response = client.models.generate_content(
+                            model=active_model,
+                            contents=contents,
+                            config=config,
+                        )
+                        break
+                    except Exception as call_err:
+                        last_exc = call_err
+                        err_str = str(call_err).lower()
+                        if "generaterequestsperday" in err_str:
+                            logger.warning(f"{active_model} daily quota exceeded. Trying fallback model.")
+                            break
+                        if ("503" in err_str or "unavailable" in err_str or "429" in err_str or "resource_exhausted" in err_str) and attempt < max_attempts:
+                            import re
+                            import time
+                            wait_match = re.search(r"retry in (\d+(?:\.\d+)?)s", str(call_err), re.IGNORECASE)
+                            if wait_match:
+                                sleep_sec = min(float(wait_match.group(1)) + 2.0, 75.0)
+                            else:
+                                sleep_sec = 3.0 * attempt
+                            logger.warning(f"{active_model} transient error (attempt {attempt}/{max_attempts}). Backing off {sleep_sec:.1f}s: {call_err}")
+                            time.sleep(sleep_sec)
+                            continue
+                        if ("503" in err_str or "unavailable" in err_str or "429" in err_str):
+                            logger.warning(f"{active_model} exhausted retries. Trying fallback model.")
+                            break
+                        raise
+                if response is not None:
+                    break
+
+            if response is None and last_exc is not None:
+                raise last_exc
 
             raw_text = response.text
             if not raw_text:
@@ -230,13 +286,15 @@ class LLMClient:
         cls,
         system_prompt: str,
         user_prompt: str,
+        image_parts: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
-        Send a prompt to the configured LLM and return the parsed JSON response.
+        Send a prompt (and optional multimodal image parts) to the configured LLM and return parsed JSON.
 
         Args:
             system_prompt: High-level instructions and schema definitions.
             user_prompt: Document text and extraction request.
+            image_parts: Optional list of image dicts with 'data' (bytes) and 'mime_type' (str).
 
         Returns:
             Dict[str, Any]: Parsed JSON dictionary returned by the LLM.
@@ -247,7 +305,12 @@ class LLMClient:
         # 1. Use injected mock responder if present (for tests)
         if cls._mock_responder is not None:
             try:
-                response = cls._mock_responder(system_prompt, user_prompt)
+                import inspect
+                sig = inspect.signature(cls._mock_responder)
+                if len(sig.parameters) >= 3:
+                    response = cls._mock_responder(system_prompt, user_prompt, image_parts)
+                else:
+                    response = cls._mock_responder(system_prompt, user_prompt)
                 if isinstance(response, str):
                     cleaned = cls._clean_json_text(response)
                     return json.loads(cleaned)
@@ -258,7 +321,7 @@ class LLMClient:
         # 2. Dispatch to configured provider
         provider = cls.get_provider()
         if provider == "gemini":
-            return cls._generate_gemini(system_prompt, user_prompt)
+            return cls._generate_gemini(system_prompt, user_prompt, image_parts=image_parts)
         elif provider == "openai":
             return cls._generate_openai(system_prompt, user_prompt)
         else:

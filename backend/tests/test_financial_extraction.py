@@ -37,6 +37,7 @@ from app.services.financial_extraction import (
     FinancialExtractionService,
     extract_financial_document,
 )
+from app.services.financial_validation import FinancialValidationService
 from app.services.llm_client import LLMClient, LLMClientError
 
 
@@ -138,10 +139,75 @@ class TestFinancialExtractionService(unittest.TestCase):
         self.assertEqual(data["line_items"][0]["total_price"], 500.00)
         self.assertEqual(data["additional_fields"]["remittance_bank"], "First National Bank")
 
-        # Evidence assertions
         self.assertIn("invoice_number", result.evidence)
         self.assertEqual(result.evidence["invoice_number"].source_snippet, "Invoice #: INV-2024-889")
         self.assertEqual(result.evidence["invoice_number"].page_number, 1)
+
+    def test_invoice_dual_column_net_gross_mapping(self):
+        """Verify consistent Net price, Net worth, and Gross worth mapping for multi-column VAT invoices."""
+        mock_payload = {
+            "extracted_data": {
+                "invoice_number": "94404257",
+                "invoice_date": "2013-03-07",
+                "vendor_name": "Cruz PLC",
+                "customer_name": "Sandoval-Phillips",
+                "subtotal": 30.92,
+                "tax_amount": 3.09,
+                "tax_rate": 0.10,
+                "total_amount": 34.01,
+                "currency": "USD",
+                "line_items": [
+                    {
+                        "description": "Shoeless Joe",
+                        "quantity": 5.0,
+                        "unit_price": 3.49,
+                        "total_price": 17.45,
+                        "gross_amount": 19.20,
+                        "source_snippet": "Shoeless Joe 5,00 each 3,49 17,45 10% 19,20",
+                        "page_number": 1,
+                    },
+                    {
+                        "description": "Conspiracies",
+                        "quantity": 3.0,
+                        "unit_price": 4.49,
+                        "total_price": 13.47,
+                        "gross_amount": 14.82,
+                        "source_snippet": "Conspiracies 3,00 each 4,49 13,47 10% 14,82",
+                        "page_number": 1,
+                    },
+                ],
+            },
+            "evidence": {
+                "invoice_number": {"source_snippet": "Invoice no: 94404257", "page_number": 1},
+            },
+        }
+        LLMClient.set_mock_responder(lambda sys_p, usr_p: mock_payload)
+
+        sample_text = "Invoice no: 94404257\nNet worth: 126.27\nGross worth: 138.90"
+        pages = [ExtractedPage(page_number=1, text=sample_text)]
+
+        result = extract_financial_document("invoice", sample_text, pages)
+        self.assertEqual(result.status, "SUCCESS")
+
+        data = result.data
+        self.assertIsNotNone(data)
+        # Line item consistency checks
+        item1 = data["line_items"][0]
+        self.assertEqual(item1["unit_price"], 3.49)
+        self.assertEqual(item1["total_price"], 17.45)
+        self.assertEqual(item1["gross_amount"], 19.20)
+        self.assertAlmostEqual(item1["quantity"] * item1["unit_price"], item1["total_price"], places=2)
+
+        item2 = data["line_items"][1]
+        self.assertEqual(item2["unit_price"], 4.49)
+        self.assertEqual(item2["total_price"], 13.47)
+        self.assertEqual(item2["gross_amount"], 14.82)
+        self.assertAlmostEqual(item2["quantity"] * item2["unit_price"], item2["total_price"], places=2)
+
+        # Validation engine reconciliation check
+        val_result = FinancialValidationService.validate("invoice", data)
+        self.assertTrue(val_result.is_valid)
+        self.assertEqual(val_result.summary.failed_checks, 0)
 
     # -------------------------------------------------------------------------
     # 2. Balance Sheet Extraction
@@ -500,7 +566,7 @@ class TestFinancialExtractionService(unittest.TestCase):
             os.environ.pop("LLM_MODEL", None)
 
             self.assertEqual(LLMClient.get_provider(), "gemini")
-            self.assertEqual(LLMClient.get_model(), "gemini-2.5-flash")
+            self.assertEqual(LLMClient.get_model(), "gemini-3.6-flash")
 
     def test_gemini_client_missing_key_raises_error(self):
         """Verify helpful error is raised when GEMINI_API_KEY is not configured."""
@@ -545,6 +611,134 @@ class TestFinancialExtractionService(unittest.TestCase):
                 LLMClient.generate_json("system", "user")
 
             self.assertIn("Unsupported LLM provider", str(ctx.exception))
+
+    # -------------------------------------------------------------------------
+    # 13. Multimodal Gemini Vision Fallback Tests
+    # -------------------------------------------------------------------------
+    def test_text_only_extraction_path_preserved(self):
+        """Verify digital text pages use text-only extraction without image_parts."""
+        captured = {}
+
+        def mock_responder(sys_p, usr_p, img_parts=None):
+            captured["sys_p"] = sys_p
+            captured["usr_p"] = usr_p
+            captured["img_parts"] = img_parts
+            return {
+                "extracted_data": {
+                    "total_revenue": 1000000.0,
+                    "net_income": 150000.0,
+                },
+                "evidence": {},
+            }
+
+        LLMClient.set_mock_responder(mock_responder)
+
+        digital_page = ExtractedPage(
+            page_number=1,
+            text="Total Revenue: $1,000,000\nNet Income: $150,000",
+            image_bytes=None,
+            mime_type=None,
+            is_scanned=False,
+        )
+
+        result = extract_financial_document("profit_and_loss", digital_page.text, [digital_page])
+
+        self.assertEqual(result.status, "SUCCESS")
+        self.assertIsNone(captured["img_parts"])
+        self.assertIn("Total Revenue: $1,000,000", captured["usr_p"])
+
+    def test_scanned_multimodal_extraction_passes_images_to_llm(self):
+        """Verify scanned/image pages pass image bytes, mime_type, and page_number to LLM client."""
+        captured = {}
+        fake_image_bytes = b"\xff\xd8\xff\xe0fake_jpeg_image_data"
+
+        def mock_responder(sys_p, usr_p, img_parts=None):
+            captured["sys_p"] = sys_p
+            captured["usr_p"] = usr_p
+            captured["img_parts"] = img_parts
+            return {
+                "extracted_data": {
+                    "total_revenue": 1470682663.0,
+                    "net_income": 272539506.0,
+                    "additional_fields": {
+                        "total_expenditure": 1197720010.0,
+                    },
+                    "line_items": [
+                        {
+                            "category": "INCOME",
+                            "item_name": "Interest earned",
+                            "amount": 1221892915.0,
+                            "source_snippet": "Interest earned 1,221,892,915",
+                            "page_number": 1,
+                        },
+                        {
+                            "category": "INCOME",
+                            "item_name": "Other income",
+                            "amount": 248789748.0,
+                            "source_snippet": "Other income 248,789,748",
+                            "page_number": 1,
+                        },
+                    ],
+                },
+                "evidence": {
+                    "total_revenue": {"source_snippet": "Total 1,470,682,663", "page_number": 1},
+                },
+            }
+
+        LLMClient.set_mock_responder(mock_responder)
+
+        scanned_page = ExtractedPage(
+            page_number=1,
+            text="[OCR fallback text]",
+            image_bytes=fake_image_bytes,
+            mime_type="image/jpeg",
+            is_scanned=True,
+        )
+
+        result = extract_financial_document("profit_and_loss", scanned_page.text, [scanned_page])
+
+        self.assertEqual(result.status, "SUCCESS")
+        self.assertIsNotNone(captured["img_parts"])
+        self.assertEqual(len(captured["img_parts"]), 1)
+        self.assertEqual(captured["img_parts"][0]["data"], fake_image_bytes)
+        self.assertEqual(captured["img_parts"][0]["mime_type"], "image/jpeg")
+        self.assertEqual(captured["img_parts"][0]["page_number"], 1)
+
+        # Confirm data parsed accurately
+        self.assertEqual(result.data["additional_fields"]["total_expenditure"], 1197720010.0)
+        self.assertEqual(result.data["total_revenue"], 1470682663.0)
+
+    def test_multimodal_multi_page_boundary_preservation(self):
+        """Verify multi-page scanned documents preserve all page images and page numbers."""
+        captured = {}
+        fake_page1 = b"\x89PNGfake_page_1"
+        fake_page2 = b"\x89PNGfake_page_2"
+
+        def mock_responder(sys_p, usr_p, img_parts=None):
+            captured["img_parts"] = img_parts
+            return {
+                "extracted_data": {
+                    "company_name": "Multi-Page Corp",
+                    "total_assets": 5000000.0,
+                },
+                "evidence": {},
+            }
+
+        LLMClient.set_mock_responder(mock_responder)
+
+        page1 = ExtractedPage(page_number=1, text="Page 1", image_bytes=fake_page1, mime_type="image/png", is_scanned=True)
+        page2 = ExtractedPage(page_number=2, text="Page 2", image_bytes=fake_page2, mime_type="image/png", is_scanned=True)
+
+        result = extract_financial_document("balance_sheet", "Page 1\n\nPage 2", [page1, page2])
+
+        self.assertEqual(result.status, "SUCCESS")
+        self.assertEqual(len(captured["img_parts"]), 2)
+        self.assertEqual(captured["img_parts"][0]["page_number"], 1)
+        self.assertEqual(captured["img_parts"][0]["data"], fake_page1)
+        self.assertEqual(captured["img_parts"][0]["mime_type"], "image/png")
+        self.assertEqual(captured["img_parts"][1]["page_number"], 2)
+        self.assertEqual(captured["img_parts"][1]["data"], fake_page2)
+        self.assertEqual(captured["img_parts"][1]["mime_type"], "image/png")
 
 
 if __name__ == "__main__":

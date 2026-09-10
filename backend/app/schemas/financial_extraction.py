@@ -7,7 +7,7 @@ supporting invoices, balance sheets, profit & loss statements, and cash flow sta
 
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class FinancialDocumentType(str, Enum):
@@ -35,10 +35,17 @@ class FieldEvidence(BaseModel):
 class InvoiceLineItem(BaseModel):
     """Individual line item from an invoice."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     description: Optional[str] = None
     quantity: Optional[float] = None
     unit_price: Optional[float] = None
     total_price: Optional[float] = None
+    gross_amount: Optional[float] = Field(
+        default=None,
+        validation_alias=AliasChoices("gross_amount", "gross_total", "gross_worth"),
+        description="Gross / post-tax line total (Gross worth) including tax if present",
+    )
     item_code: Optional[str] = None
     source_snippet: Optional[str] = None
     page_number: Optional[int] = None

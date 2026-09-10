@@ -10,9 +10,16 @@ from typing import Any, Optional
 
 from sqlalchemy import DateTime, Integer, String, func
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
+
+
+# Enable JSONB compilation on SQLite for offline unit tests
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_sqlite(type_, compiler, **kw):
+    return "JSON"
 
 
 class Document(Base):

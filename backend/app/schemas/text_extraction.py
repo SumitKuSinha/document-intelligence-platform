@@ -4,7 +4,7 @@ Text Extraction Schemas
 Data models representing page-level text extraction and OCR results.
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -19,6 +19,18 @@ class ExtractedPage(BaseModel):
 
     page_number: int = Field(..., description="1-indexed page number within the document.", ge=1)
     text: str = Field(..., description="Raw text extracted from this page.")
+    image_bytes: Optional[bytes] = Field(
+        default=None,
+        description="Raw image bytes if this page is scanned / image-based.",
+    )
+    mime_type: Optional[str] = Field(
+        default=None,
+        description="MIME type of page image (e.g. 'image/jpeg', 'image/png').",
+    )
+    is_scanned: bool = Field(
+        default=False,
+        description="True if page contains no digital text and was processed as an image.",
+    )
 
 
 class TextExtractionResult(BaseModel):

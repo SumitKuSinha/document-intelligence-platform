@@ -92,6 +92,9 @@ class TextExtractionService:
                         ExtractedPage(
                             page_number=page_data.page_number,
                             text=page_data.text,
+                            image_bytes=None,
+                            mime_type=None,
+                            is_scanned=False,
                         )
                     )
                 elif page_data.images:
@@ -108,10 +111,21 @@ class TextExtractionService:
                             )
 
                     merged_ocr_text = "\n\n".join(ocr_results)
+                    primary_image = page_data.images[0] if page_data.images else None
+                    mime = "image/jpeg"
+                    if primary_image:
+                        if primary_image.startswith(b"\x89PNG"):
+                            mime = "image/png"
+                        elif primary_image.startswith(b"\xff\xd8\xff"):
+                            mime = "image/jpeg"
+
                     pages.append(
                         ExtractedPage(
                             page_number=page_data.page_number,
                             text=merged_ocr_text,
+                            image_bytes=primary_image,
+                            mime_type=mime,
+                            is_scanned=True,
                         )
                     )
                     warnings.append(
@@ -123,6 +137,9 @@ class TextExtractionService:
                         ExtractedPage(
                             page_number=page_data.page_number,
                             text="",
+                            image_bytes=None,
+                            mime_type=None,
+                            is_scanned=False,
                         )
                     )
                     warnings.append(
@@ -133,10 +150,14 @@ class TextExtractionService:
         elif file_type in ("png", "jpeg"):
             try:
                 ocr_text = OCRService.extract_text_from_image(content)
+                mime = "image/png" if file_type == "png" else "image/jpeg"
                 pages.append(
                     ExtractedPage(
                         page_number=1,
                         text=ocr_text,
+                        image_bytes=content,
+                        mime_type=mime,
+                        is_scanned=True,
                     )
                 )
             except OCRError as exc:

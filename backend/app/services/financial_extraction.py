@@ -79,26 +79,48 @@ class FinancialExtractionService:
                 ],
             )
 
-        # 2. Validate input text presence
-        if not extracted_text or not extracted_text.strip():
+        # Check if scanned / raster image pages are available for multimodal extraction
+        scanned_pages = [
+            p for p in (pages or [])
+            if getattr(p, "is_scanned", False) and getattr(p, "image_bytes", None)
+        ]
+        is_multimodal = len(scanned_pages) > 0
+
+        # 2. Validate input presence (text or multimodal images)
+        has_text = bool(extracted_text and extracted_text.strip())
+        if not has_text and not is_multimodal:
             return FinancialExtractionResult(
                 document_type=doc_type_clean,
                 status="FAILED",
                 data=None,
                 evidence={},
-                errors=["Document text is empty or unreadable. Cannot perform extraction."],
+                errors=["Document content is empty or unreadable. Cannot perform extraction."],
             )
 
-        # 3. Format document text and page context for the LLM
-        formatted_context = cls._format_page_context(extracted_text, pages)
-
-        # 4. Generate system and user prompts
+        # 3. Build prompts and payload
         system_prompt = cls._build_system_prompt(doc_type_clean)
-        user_prompt = cls._build_user_prompt(doc_type_clean, formatted_context)
+        image_parts = None
 
-        # 5. Call LLM Client
+        if is_multimodal:
+            image_parts = []
+            for p in scanned_pages:
+                image_parts.append({
+                    "page_number": p.page_number,
+                    "data": p.image_bytes,
+                    "mime_type": getattr(p, "mime_type", None) or "image/jpeg",
+                })
+            user_prompt = cls._build_multimodal_user_prompt(doc_type_clean, scanned_pages)
+        else:
+            formatted_context = cls._format_page_context(extracted_text, pages)
+            user_prompt = cls._build_user_prompt(doc_type_clean, formatted_context)
+
+        # 4. Call LLM Client
         try:
-            raw_response = LLMClient.generate_json(system_prompt, user_prompt)
+            raw_response = LLMClient.generate_json(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                image_parts=image_parts,
+            )
         except LLMClientError as exc:
             return FinancialExtractionResult(
                 document_type=doc_type_clean,
@@ -116,7 +138,7 @@ class FinancialExtractionService:
                 errors=[f"Unexpected error during extraction: {exc}"],
             )
 
-        # 6. Parse and validate LLM output against document-specific schema
+        # 5. Parse and validate LLM output against document-specific schema
         return cls._parse_and_validate_response(doc_type_clean, raw_response)
 
     # ---------------------------------------------------------------------------
@@ -156,15 +178,18 @@ class FinancialExtractionService:
                 "- vendor_tax_id (string or null)\n"
                 "- customer_name (string or null)\n"
                 "- customer_address (string or null)\n"
-                "- subtotal (float or null)\n"
-                "- tax_amount (float or null)\n"
+                "- subtotal (float or null: NET pre-tax subtotal / Net worth)\n"
+                "- tax_amount (float or null: total tax / VAT amount)\n"
                 "- tax_rate (float or null, e.g. 0.08 for 8%)\n"
                 "- discount_amount (float or null)\n"
                 "- shipping_amount (float or null)\n"
-                "- total_amount (float or null)\n"
+                "- total_amount (float or null: GROSS total / Gross worth including tax)\n"
                 "- currency (string ISO code e.g. USD, EUR, INR or null)\n"
                 "- payment_terms (string or null)\n"
-                "- line_items (list of objects: description, quantity, unit_price, total_price, item_code, source_snippet, page_number)\n"
+                "- line_items (list of objects: description, quantity, unit_price, total_price, gross_amount, item_code, source_snippet, page_number)\n"
+                "  * unit_price: NET / pre-tax unit price (e.g. 'Net price', unit price before VAT/tax).\n"
+                "  * total_price: NET / pre-tax line total (e.g. 'Net worth', quantity * unit_price before VAT/tax).\n"
+                "  * gross_amount: GROSS / post-tax line total (e.g. 'Gross worth', line total including VAT/tax if printed; null if not printed).\n"
                 "- additional_fields (object: any other visible key-values like bank details, notes, etc.)\n"
             ),
             "balance_sheet": (
@@ -236,7 +261,13 @@ class FinancialExtractionService:
             "4. Numbers must be numeric floats without currency symbols or commas (e.g. 1250.00, not '$1,250.00').\n"
             "5. For every extracted top-level field, include an entry in the 'evidence' dictionary with:\n"
             "   - 'source_snippet': the verbatim text snippet from the document.\n"
-            "   - 'page_number': the 1-indexed page number where it appears (from the [PAGE X] headers).\n\n"
+            "   - 'page_number': the 1-indexed page number where it appears (from the [PAGE X] headers).\n"
+            "6. In invoices with distinct Net and Gross amounts (such as Net price, Net worth, VAT, and Gross worth):\n"
+            "   - 'subtotal' must represent the pre-tax total (Net worth).\n"
+            "   - 'total_amount' must represent the final post-tax total (Gross worth).\n"
+            "   - For each line item, 'unit_price' must be the pre-tax unit price (Net price), 'total_price' must be "
+            "the pre-tax line total (Net worth = quantity * unit_price), and 'gross_amount' must be the post-tax line total "
+            "(Gross worth) including tax.\n\n"
             f"{type_instructions.get(document_type, '')}\n"
             "Return JSON matching this top-level format exactly:\n"
             "{\n"
@@ -253,6 +284,24 @@ class FinancialExtractionService:
         return (
             f"Extract all financial data and line items for this {document_type.replace('_', ' ').upper()} document.\n\n"
             f"{formatted_context}"
+        )
+
+    @classmethod
+    def _build_multimodal_user_prompt(
+        cls,
+        document_type: str,
+        scanned_pages: List[ExtractedPage],
+    ) -> str:
+        """Construct multimodal user prompt providing extraction instructions for attached page image(s)."""
+        page_descriptions = [
+            f"Page {p.page_number} is attached as an image." for p in scanned_pages
+        ]
+        pages_summary = " ".join(page_descriptions)
+        return (
+            f"Extract all financial data, line items, and metrics for this {document_type.replace('_', ' ').upper()} document directly from the attached document page image(s).\n"
+            f"{pages_summary}\n"
+            "Carefully read all visible printed figures, tables, line items, schedules, descriptions, and totals directly from the image.\n"
+            "For each extracted field, record the verbatim text snippet and 1-indexed page_number in 'evidence'."
         )
 
     # ---------------------------------------------------------------------------

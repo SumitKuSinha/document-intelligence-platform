@@ -1,5 +1,6 @@
 """Services package."""
 
+from app.services.document_processing import DocumentProcessingService
 from app.services.file_validation import (
     FileValidationError,
     FileValidationService,
@@ -8,6 +9,11 @@ from app.services.file_validation import (
 from app.services.financial_extraction import (
     FinancialExtractionService,
     extract_financial_document,
+)
+from app.services.financial_validation import (
+    FinancialValidationService,
+    parse_financial_number,
+    validate_financial_data,
 )
 from app.services.llm_client import LLMClient, LLMClientError
 from app.services.ocr_service import OCRError, OCRService
@@ -31,5 +37,11 @@ __all__ = [
     "LLMClientError",
     "FinancialExtractionService",
     "extract_financial_document",
+    "FinancialValidationService",
+    "validate_financial_data",
+    "parse_financial_number",
+    "DocumentProcessingService",
 ]
+
+
 
