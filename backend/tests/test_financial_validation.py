@@ -561,6 +561,138 @@ class TestBankingProfitAndLossValidation(unittest.TestCase):
         self.assertEqual(result.summary.passed_checks, 5)
         self.assertEqual(result.summary.failed_checks, 0)
 
+    def test_pnl_banking_before_minority_vs_minority_interest(self):
+        """Verify 'before minority interest' is NOT misidentified as minority interest."""
+        payload = {
+            "total_income": 470915.93,
+            "total_expenditure": 397475.76,
+            "net_income": 70792.25,
+            "line_items": [
+                {"item_name": "Interest earned", "category": "income", "amount": 336367.43},
+                {"item_name": "Other income", "category": "income", "amount": 134548.50},
+                {"item_name": "Interest expended", "category": "expenditure", "amount": 183894.20},
+                {"item_name": "Operating expenses", "category": "expenditure", "amount": 176605.07},
+                {"item_name": "Provisions and contingencies", "category": "expenditure", "amount": 36976.49},
+                {
+                    "item_name": "Consolidated Net Profit for the year before Minority Interest",
+                    "category": "profit",
+                    "amount": 73440.17,
+                },
+                {
+                    "item_name": "Less : Minority Interest",
+                    "category": "profit",
+                    "amount": 2647.92,
+                },
+                {
+                    "item_name": "Consolidated Net Profit for the year attributable to the group",
+                    "category": "profit",
+                    "amount": 70792.25,
+                },
+            ],
+        }
+
+        result = validate_financial_data("profit_and_loss", payload)
+
+        check_cons = next(c for c in result.checks if c.rule_name == "pnl_bank_consolidated_net_profit")
+        self.assertEqual(check_cons.status, ValidationStatus.PASS)
+        self.assertEqual(check_cons.input_values["minority_interest"], 2647.92)
+        self.assertEqual(check_cons.input_values["net_profit_for_the_year"], 73440.17)
+        self.assertEqual(check_cons.input_values["consolidated_net_profit"], 70792.25)
+        self.assertEqual(check_cons.variance, 0.0)
+
+    def test_pnl_banking_current_vs_brought_forward_consolidated_profit(self):
+        """Verify 'brought forward consolidated profit' is not treated as current consolidated net profit."""
+        payload = {
+            "net_income": 70792.25,
+            "line_items": [
+                {
+                    "item_name": "Consolidated Net Profit for the year before Minority Interest",
+                    "category": "profit",
+                    "amount": 73440.17,
+                },
+                {
+                    "item_name": "Less : Minority Interest",
+                    "category": "profit",
+                    "amount": 2647.92,
+                },
+                {
+                    "item_name": "Consolidated Net Profit for the year attributable to the group",
+                    "category": "profit",
+                    "amount": 70792.25,
+                },
+                {
+                    "item_name": "Brought forward consolidated profit attributable to the group",
+                    "category": "profit",
+                    "amount": 150045.57,
+                },
+            ],
+            "additional_fields": {
+                "total_appropriations": 220837.82,
+            },
+        }
+
+        result = validate_financial_data("profit_and_loss", payload)
+
+        check_cons = next(c for c in result.checks if c.rule_name == "pnl_bank_consolidated_net_profit")
+        self.assertEqual(check_cons.status, ValidationStatus.PASS)
+        self.assertEqual(check_cons.input_values["consolidated_net_profit"], 70792.25)
+        self.assertNotEqual(check_cons.input_values["consolidated_net_profit"], 150045.57)
+
+        check_approp = next(c for c in result.checks if c.rule_name == "pnl_bank_appropriations_reconciliation")
+        self.assertEqual(check_approp.status, ValidationStatus.PASS)
+        self.assertEqual(check_approp.input_values["consolidated_net_profit"], 70792.25)
+        self.assertEqual(check_approp.input_values["brought_forward_profit"], 150045.57)
+        self.assertEqual(check_approp.variance, 0.0)
+
+    def test_pnl_banking_appropriations_with_amalgamation(self):
+        """Verify appropriations reconciliation supports addition on amalgamation when reported."""
+        payload = {
+            "net_income": 64062.04,
+            "line_items": [
+                {
+                    "item_name": "Consolidated Net Profit for the year before minorities' interest",
+                    "category": "profit",
+                    "amount": 65446.50,
+                },
+                {
+                    "item_name": "Less: Minority Interest",
+                    "category": "profit",
+                    "amount": 1384.46,
+                },
+                {
+                    "item_name": "Consolidated Net Profit for the year attributable to the group",
+                    "category": "profit",
+                    "amount": 64062.04,
+                },
+                {
+                    "item_name": "Brought forward consolidated profit attributable to the group",
+                    "category": "profit",
+                    "amount": 120369.35,
+                },
+                {
+                    "item_name": "Addition on amalgamation",
+                    "category": "profit",
+                    "amount": 3570.10,
+                },
+                {
+                    "item_name": "Total",
+                    "category": "appropriations",
+                    "amount": 188001.49,
+                },
+            ],
+        }
+
+        result = validate_financial_data("profit_and_loss", payload)
+
+        check_approp = next(c for c in result.checks if c.rule_name == "pnl_bank_appropriations_reconciliation")
+        self.assertEqual(check_approp.status, ValidationStatus.PASS)
+        self.assertEqual(check_approp.input_values["consolidated_net_profit"], 64062.04)
+        self.assertEqual(check_approp.input_values["brought_forward_profit"], 120369.35)
+        self.assertEqual(check_approp.input_values["addition_on_amalgamation"], 3570.10)
+        self.assertEqual(check_approp.calculated_value, 188001.49)
+        self.assertEqual(check_approp.reported_value, 188001.49)
+        self.assertEqual(check_approp.variance, 0.0)
+
 
 class TestCashFlowValidation(unittest.TestCase):
     """Unit tests for Cash Flow Statement reconciliation."""
@@ -580,6 +712,33 @@ class TestCashFlowValidation(unittest.TestCase):
         self.assertTrue(result.is_valid)
         self.assertEqual(result.summary.failed_checks, 0)
         self.assertEqual(result.summary.passed_checks, 2)
+
+    def test_cash_flow_pass_with_exchange_fluctuation(self):
+        """Verify Cash Flow statement passes when standard exchange fluctuation is present."""
+        payload = {
+            "net_cash_from_operating_activities": -168690920.0,
+            "net_cash_from_investing_activities": -16169244.0,
+            "net_cash_from_financing_activities": 243944969.0,
+            "net_change_in_cash": 61224696.0,
+            "beginning_cash_balance": 818176423.0,
+            "ending_cash_balance": 879401119.0,
+            "line_items": [
+                {
+                    "category": "Other",
+                    "item_name": "Effect of exchange fluctuation on translation reserve",
+                    "amount": 2139891.0,
+                }
+            ],
+        }
+
+        result = validate_financial_data("cash_flow_statement", payload)
+
+        self.assertTrue(result.is_valid)
+        self.assertEqual(result.summary.failed_checks, 0)
+        self.assertEqual(result.summary.passed_checks, 2)
+        nc_check = next(c for c in result.checks if c.rule_name == "cash_flow_net_change_calculation")
+        self.assertEqual(nc_check.status, ValidationStatus.PASS)
+        self.assertEqual(nc_check.variance, 0.0)
 
     def test_cash_flow_net_change_fail(self):
         payload = {

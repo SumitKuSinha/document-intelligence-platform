@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Intelligent Document Extraction Platform</title>
+  <link rel="stylesheet" href="/static/css/styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- Top Navigation / Header -->
+  <header class="navbar">
+    <div class="nav-container">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+            <line x1="16" y1="13" x2="8" y2="13"></line>
+            <line x1="16" y1="17" x2="8" y2="17"></line>
+            <polyline points="10 9 9 9 8 9"></polyline>
+          </svg>
+        </div>
+        <div>
+          <h1 class="brand-title">Intelligent Document Extraction Platform</h1>
+          <p class="brand-subtitle">AI-Powered Extraction & Deterministic Financial Validation</p>
+        </div>
+      </div>
+      
+      <!-- Backend Health Indicator -->
+      <div class="health-indicator" id="healthIndicator" title="Click to refresh connection status">
+        <span class="status-dot status-unknown" id="statusDot"></span>
+        <span class="status-text" id="statusText">Checking Backend...</span>
+        <button class="btn-refresh" id="btnRefreshHealth" title="Retry connection" aria-label="Refresh connection">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"></polyline>
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="main-container">
+    <!-- Intro Banner -->
+    <section class="intro-section">
+      <p class="intro-text">
+        Automated ingestion, multimodal text/vision extraction, and deterministic mathematical validation for enterprise financial documents. Supports <strong>Invoices</strong>, <strong>Balance Sheets</strong>, <strong>Profit & Loss Statements</strong>, and <strong>Cash Flow Statements</strong>.
+      </p>
+    </section>
+
+    <!-- Global Alert / Notification Container -->
+    <div id="alertContainer" class="alert-container hidden"></div>
+
+    <!-- Upload & Configuration Card -->
+    <section class="card upload-card" id="uploadSection">
+      <div class="card-header">
+        <h2 class="card-title">
+          <span class="step-badge">1</span>
+          Select Document Type & Upload File
+        </h2>
+      </div>
+      <div class="card-body">
+        <!-- Document Type Selector -->
+        <div class="form-group">
+          <label class="form-label">Document Category <span class="required">*</span></label>
+          <div class="doc-type-grid" id="docTypeGrid">
+            <label class="doc-type-card active" data-type="invoice">
+              <input type="radio" name="document_type" value="invoice" checked>
+              <div class="doc-icon">🧾</div>
+              <div class="doc-meta">
+                <span class="doc-name">Invoice</span>
+                <span class="doc-desc">Net/gross lines, VAT & subtotal</span>
+              </div>
+            </label>
+
+            <label class="doc-type-card" data-type="balance_sheet">
+              <input type="radio" name="document_type" value="balance_sheet">
+              <div class="doc-icon">🏛️</div>
+              <div class="doc-meta">
+                <span class="doc-name">Balance Sheet</span>
+                <span class="doc-desc">Assets = Liabilities + Equity</span>
+              </div>
+            </label>
+
+            <label class="doc-type-card" data-type="profit_and_loss">
+              <input type="radio" name="document_type" value="profit_and_loss">
+              <div class="doc-icon">📈</div>
+              <div class="doc-meta">
+                <span class="doc-name">Profit & Loss</span>
+                <span class="doc-desc">Income, expenses & net profit</span>
+              </div>
+            </label>
+
+            <label class="doc-type-card" data-type="cash_flow_statement">
+              <input type="radio" name="document_type" value="cash_flow_statement">
+              <div class="doc-icon">💰</div>
+              <div class="doc-meta">
+                <span class="doc-name">Cash Flow Statement</span>
+                <span class="doc-desc">Operating, investing & financing</span>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- Drag and Drop Upload Box -->
+        <div class="form-group">
+          <label class="form-label">Document File <span class="required">*</span></label>
+          <div class="drop-zone" id="dropZone">
+            <input type="file" id="fileInput" accept=".pdf,.jpg,.jpeg,.png" class="file-input-hidden">
+            <div class="drop-zone-content">
+              <div class="upload-icon-wrapper">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+              </div>
+              <p class="drop-text">
+                <strong>Click to browse</strong> or drag & drop file here
+              </p>
+              <p class="drop-hint">Supported formats: PDF, JPG, JPEG, PNG (Max 50MB, up to 10 pages)</p>
+            </div>
+          </div>
+
+          <!-- File Info Pill (when file selected) -->
+          <div id="fileInfoBox" class="file-info-box hidden">
+            <div class="file-meta">
+              <div class="file-badge" id="fileBadge">PDF</div>
+              <div>
+                <span class="file-name" id="fileName">document.pdf</span>
+                <span class="file-size" id="fileSize">0 KB</span>
+              </div>
+            </div>
+            <button type="button" class="btn-remove-file" id="btnRemoveFile" title="Remove selected file" aria-label="Remove selected file">✕</button>
+          </div>
+        </div>
+
+        <!-- Submit Button -->
+        <div class="action-bar">
+          <button type="button" class="btn btn-primary" id="btnProcess" disabled>
+            <span class="btn-icon">⚡</span>
+            <span id="btnProcessText">Process Document</span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Processing State Indicator (Shown while active) -->
+    <section class="card loading-card hidden" id="loadingSection">
+      <div class="card-body loading-body">
+        <div class="spinner"></div>
+        <div class="loading-content">
+          <h3 class="loading-title">Processing Document...</h3>
+          <p class="loading-status" id="loadingStageText">Validating file structure and format...</p>
+          <div class="loading-steps">
+            <span class="step-dot active"></span> File Validation &rarr;
+            <span class="step-dot"></span> OCR / Vision &rarr;
+            <span class="step-dot"></span> Field Extraction &rarr;
+            <span class="step-dot"></span> Deterministic Math Verification
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Results Section (Dynamically populated upon success or validation failure) -->
+    <div id="resultsWrapper" class="results-wrapper hidden">
+      <!-- Section 1: Overview & Document Status -->
+      <section class="card overview-card">
+        <div class="card-header flex-between">
+          <h2 class="card-title">
+            <span class="step-badge">2</span>
+            Document Processing Overview
+          </h2>
+          <div id="statusBadgeContainer"></div>
+        </div>
+        <div class="card-body">
+          <div class="overview-grid">
+            <div class="overview-item">
+              <span class="overview-label">Document Name</span>
+              <span class="overview-value text-break" id="resDocName">—</span>
+            </div>
+            <div class="overview-item">
+              <span class="overview-label">Category</span>
+              <span class="overview-value" id="resDocType">—</span>
+            </div>
+            <div class="overview-item">
+              <span class="overview-label">File Type</span>
+              <span class="overview-value" id="resFileType">—</span>
+            </div>
+            <div class="overview-item">
+              <span class="overview-label">Page Count</span>
+              <span class="overview-value" id="resPageCount">—</span>
+            </div>
+            <div class="overview-item">
+              <span class="overview-label">Database Record ID</span>
+              <span class="overview-value" id="resDocId">—</span>
+            </div>
+            <div class="overview-item">
+              <span class="overview-label">Processed At</span>
+              <span class="overview-value" id="resTimestamp">—</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Section 2: Deterministic Financial Validations -->
+      <section class="card validations-card" id="validationsSection">
+        <div class="card-header flex-between">
+          <h2 class="card-title">
+            <span class="step-badge">3</span>
+            Financial Validation Results
+          </h2>
+          <div class="validation-counts" id="validationCounts">
+            <span class="badge badge-pass" id="badgePassCount">0 Passed</span>
+            <span class="badge badge-fail" id="badgeFailCount">0 Failed</span>
+            <span class="badge badge-na" id="badgeNaCount">0 N/A</span>
+          </div>
+        </div>
+        <div class="card-body">
+          <div id="validationList" class="validation-list">
+            <!-- Dynamic validation check items will be inserted here -->
+          </div>
+        </div>
+      </section>
+
+      <!-- Section 3: Extracted Financial Data (Dynamic fields & line items table) -->
+      <section class="card extracted-data-card" id="extractedDataSection">
+        <div class="card-header">
+          <h2 class="card-title">
+            <span class="step-badge">4</span>
+            Extracted Financial Fields & Details
+          </h2>
+        </div>
+        <div class="card-body">
+          <!-- Top-level Key/Value Entity Grid -->
+          <div class="fields-grid" id="fieldsGrid">
+            <!-- Dynamically populated key/value cards -->
+          </div>
+
+          <!-- Dynamic Line Items Table -->
+          <div id="lineItemsContainer" class="line-items-container hidden">
+            <div class="section-divider">
+              <h3 class="section-subtitle">
+                Line Items & Financial Schedules
+                <span class="count-pill" id="lineItemCountPill">0 items</span>
+              </h3>
+            </div>
+            <div class="table-responsive">
+              <table class="data-table" id="lineItemsTable">
+                <thead>
+                  <tr id="lineItemsTableHead">
+                    <th>#</th>
+                    <th>Category</th>
+                    <th>Item Description</th>
+                    <th>Amount</th>
+                    <th>Details</th>
+                  </tr>
+                </thead>
+                <tbody id="lineItemsTableBody">
+                  <!-- Dynamic rows -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Additional Fields / Disclosures -->
+          <div id="additionalFieldsContainer" class="additional-fields-container hidden">
+            <div class="section-divider">
+              <h3 class="section-subtitle">Disclosures & Additional Fields</h3>
+            </div>
+            <div class="fields-grid" id="additionalFieldsGrid">
+              <!-- Dynamically populated -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Section 4: Raw JSON Response (Collapsible) -->
+      <section class="card json-card">
+        <details class="json-details" id="jsonDetails">
+          <summary class="json-summary">
+            <div class="flex-between w-100">
+              <span class="card-title">
+                <span class="step-badge">5</span>
+                Raw JSON API Response
+              </span>
+              <button type="button" class="btn btn-sm btn-outline" id="btnCopyJson">Copy JSON</button>
+            </div>
+          </summary>
+          <div class="card-body json-body">
+            <pre class="json-code" id="rawJsonCode"><code>{}</code></pre>
+          </div>
+        </details>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-container">
+      <p>Intelligent Document Extraction Platform &bull; REST API & Deterministic Safety Engine &bull; Version 0.1.0</p>
+    </div>
+  </footer>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

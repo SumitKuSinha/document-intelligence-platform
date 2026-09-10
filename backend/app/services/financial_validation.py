@@ -879,8 +879,9 @@ class FinancialValidationService:
         line_items: List[Any],
         keywords: List[str],
         category_keyword: Optional[str] = None,
+        exclude_keywords: Optional[List[str]] = None,
     ) -> Optional[float]:
-        """Find line item amount matching keywords and optional category."""
+        """Find line item amount matching keywords, optional category, and excluding disallowed keywords."""
         if not line_items:
             return None
         for item in line_items:
@@ -893,6 +894,8 @@ class FinancialValidationService:
             name = str(item_dict.get("item_name") or item_dict.get("description") or "").lower()
             cat = str(item_dict.get("category") or "").lower()
             if category_keyword and category_keyword.lower() not in cat:
+                continue
+            if exclude_keywords and any(ex.lower() in name for ex in exclude_keywords):
                 continue
             if any(kw.lower() in name for kw in keywords):
                 amt = parse_financial_number(item_dict.get("amount") or item_dict.get("total_price"))
@@ -1353,12 +1356,57 @@ class FinancialValidationService:
         # Check 7 (Banking): Net Profit for the Year - Minority Interest == Consolidated Net Profit
         minority_interest = (
             cls._find_additional_field_amount(add_fields, ["minority_interest", "less_minority_interest", "minority_interests"])
-            or cls._find_line_item_amount(raw_items, ["minority interest", "less : minority interest", "less: minority interest"], category_keyword="profit")
-            or cls._find_line_item_amount(raw_items, ["minority interest", "less : minority interest", "less: minority interest"])
+            or cls._find_line_item_amount(
+                raw_items,
+                ["less : minority interest", "less: minority interest", "minority interest", "minority interests"],
+                category_keyword="profit",
+                exclude_keywords=["before", "before minority", "before minorities"],
+            )
+            or cls._find_line_item_amount(
+                raw_items,
+                ["less : minority interest", "less: minority interest", "minority interest", "minority interests"],
+                exclude_keywords=["before", "before minority", "before minorities"],
+            )
         )
         consolidated_profit = (
-            cls._find_additional_field_amount(add_fields, ["consolidated_profit_for_the_year", "consolidated_profit", "consolidated_net_profit"])
-            or cls._find_line_item_amount(raw_items, ["consolidated profit for the year", "consolidated profit"], category_keyword="profit")
+            cls._find_additional_field_amount(add_fields, [
+                "consolidated_net_profit_for_the_year_attributable_to_the_group",
+                "consolidated_profit_for_the_year_attributable_to_the_group",
+                "consolidated_net_profit_attributable_to_group",
+                "consolidated_profit_attributable_to_group",
+                "consolidated_profit_for_the_year",
+                "consolidated_net_profit",
+                "consolidated_profit",
+            ])
+            or cls._find_line_item_amount(
+                raw_items,
+                [
+                    "consolidated net profit for the year attributable to the group",
+                    "consolidated profit for the year attributable to the group",
+                    "consolidated net profit attributable to the group",
+                    "consolidated profit attributable to the group",
+                    "consolidated net profit for the year",
+                    "consolidated profit for the year",
+                    "consolidated net profit",
+                    "consolidated profit",
+                ],
+                category_keyword="profit",
+                exclude_keywords=["brought forward", "before", "before minority", "before minorities"],
+            )
+            or cls._find_line_item_amount(
+                raw_items,
+                [
+                    "consolidated net profit for the year attributable to the group",
+                    "consolidated profit for the year attributable to the group",
+                    "consolidated net profit attributable to the group",
+                    "consolidated profit attributable to the group",
+                    "consolidated net profit for the year",
+                    "consolidated profit for the year",
+                    "consolidated net profit",
+                    "consolidated profit",
+                ],
+                exclude_keywords=["brought forward", "before", "before minority", "before minorities"],
+            )
             or parse_financial_number(payload.get("net_income"))
         )
 
@@ -1422,16 +1470,24 @@ class FinancialValidationService:
         # Check 8 (Banking): Consolidated Profit + Brought Forward Profit == Total Appropriations
         brought_forward = (
             cls._find_additional_field_amount(add_fields, [
+                "brought_forward_consolidated_profit_attributable_to_the_group",
+                "brought_forward_consolidated_profit",
                 "balance_in_profit_and_loss_account_brought_forward",
                 "balance_in_the_profit_and_loss_account_brought_forward",
                 "balance_brought_forward",
-                "profit_brought_forward"
+                "profit_brought_forward",
+                "brought_forward_profit",
+                "brought_forward",
             ])
             or cls._find_line_item_amount(raw_items, [
+                "brought forward consolidated profit attributable to the group",
+                "brought forward consolidated profit",
                 "balance in the profit and loss account brought forward",
                 "balance in profit and loss account brought forward",
+                "brought forward profit",
+                "profit brought forward",
                 "balance brought forward",
-                "profit brought forward"
+                "brought forward",
             ])
         )
         total_appropriations = (
@@ -1441,6 +1497,15 @@ class FinancialValidationService:
             ])
             or cls._find_line_item_amount(raw_items, ["total"], category_keyword="appropriations")
             or cls._find_line_item_amount(raw_items, ["total appropriations"])
+        )
+        amalgamation_addition = (
+            cls._find_additional_field_amount(add_fields, [
+                "addition_on_amalgamation",
+                "amalgamation_addition",
+                "amalgamation",
+            ])
+            or cls._find_line_item_amount(raw_items, ["addition on amalgamation", "amalgamation"], category_keyword="profit")
+            or cls._find_line_item_amount(raw_items, ["addition on amalgamation", "amalgamation"])
         )
 
         missing_bank_approp = []
@@ -1471,25 +1536,43 @@ class FinancialValidationService:
                 )
             )
         else:
-            calc_approp = round(consolidated_profit + brought_forward, 4)
-            var_approp = round(calc_approp - total_appropriations, 4)
+            if amalgamation_addition is not None:
+                calc_approp = round(consolidated_profit + brought_forward + amalgamation_addition, 4)
+                var_approp = round(calc_approp - total_appropriations, 4)
+                formula_approp = "consolidated_net_profit + brought_forward_profit + addition_on_amalgamation == total_appropriations"
+                input_approp = {
+                    "consolidated_net_profit": consolidated_profit,
+                    "brought_forward_profit": brought_forward,
+                    "addition_on_amalgamation": amalgamation_addition,
+                    "total_appropriations": total_appropriations,
+                }
+                msg_approp = (
+                    f"Banking appropriations reconciliation verified: {consolidated_profit} + {brought_forward} + {amalgamation_addition} = {total_appropriations}."
+                    if abs(var_approp) <= tol
+                    else f"Banking appropriations reconciliation mismatch: {consolidated_profit} + {brought_forward} + {amalgamation_addition} = {calc_approp} != reported {total_appropriations} (variance: {var_approp})."
+                )
+            else:
+                calc_approp = round(consolidated_profit + brought_forward, 4)
+                var_approp = round(calc_approp - total_appropriations, 4)
+                formula_approp = "consolidated_net_profit + brought_forward_profit == total_appropriations"
+                input_approp = {
+                    "consolidated_net_profit": consolidated_profit,
+                    "brought_forward_profit": brought_forward,
+                    "total_appropriations": total_appropriations,
+                }
+                msg_approp = (
+                    f"Banking appropriations reconciliation verified: {consolidated_profit} + {brought_forward} = {total_appropriations}."
+                    if abs(var_approp) <= tol
+                    else f"Banking appropriations reconciliation mismatch: {consolidated_profit} + {brought_forward} = {calc_approp} != reported {total_appropriations} (variance: {var_approp})."
+                )
             status_approp = (
                 ValidationStatus.PASS if abs(var_approp) <= tol else ValidationStatus.FAILED
-            )
-            msg_approp = (
-                f"Banking appropriations reconciliation verified: {consolidated_profit} + {brought_forward} = {total_appropriations}."
-                if status_approp == ValidationStatus.PASS
-                else f"Banking appropriations reconciliation mismatch: {consolidated_profit} + {brought_forward} = {calc_approp} != reported {total_appropriations} (variance: {var_approp})."
             )
             checks.append(
                 ValidationCheckResult(
                     rule_name="pnl_bank_appropriations_reconciliation",
-                    formula="consolidated_net_profit + brought_forward_profit == total_appropriations",
-                    input_values={
-                        "consolidated_net_profit": consolidated_profit,
-                        "brought_forward_profit": brought_forward,
-                        "total_appropriations": total_appropriations,
-                    },
+                    formula=formula_approp,
+                    input_values=input_approp,
                     calculated_value=calc_approp,
                     reported_value=total_appropriations,
                     variance=var_approp,
@@ -1518,7 +1601,28 @@ class FinancialValidationService:
         beginning = parse_financial_number(payload.get("beginning_cash_balance"))
         ending = parse_financial_number(payload.get("ending_cash_balance"))
 
-        # Check 1: Operating + Investing + Financing == Net Change in Cash
+        add_fields = payload.get("additional_fields") if isinstance(payload.get("additional_fields"), dict) else {}
+        raw_items = payload.get("line_items") if isinstance(payload.get("line_items"), list) else []
+
+        exchange_effect = (
+            parse_financial_number(payload.get("effect_of_exchange_rate_changes"))
+            or parse_financial_number(payload.get("exchange_rate_effect"))
+            or cls._find_additional_field_amount(add_fields, [
+                "effect_of_exchange_rate_changes",
+                "effect_of_exchange_fluctuation",
+                "exchange_fluctuation",
+                "translation_reserve_exchange_fluctuation",
+            ])
+            or cls._find_line_item_amount(raw_items, [
+                "effect of exchange fluctuation on translation reserve",
+                "effect of exchange rate changes on cash",
+                "effect of exchange fluctuation",
+                "effect of exchange rate changes",
+                "exchange fluctuation",
+            ])
+        )
+
+        # Check 1: Operating + Investing + Financing (+ Exchange Fluctuation) == Net Change in Cash
         missing_nc = []
         if operating is None:
             missing_nc.append("net_cash_from_operating_activities")
@@ -1550,28 +1654,43 @@ class FinancialValidationService:
                 )
             )
         else:
-            calc_nc = round(operating + investing + financing, 4)
-            var = round(calc_nc - net_change, 4)
+            if exchange_effect is not None:
+                calc_nc = round(operating + investing + financing + exchange_effect, 4)
+                var = round(calc_nc - net_change, 4)
+                formula_nc = "net_cash_from_operating_activities + net_cash_from_investing_activities + net_cash_from_financing_activities + effect_of_exchange_rate_changes == net_change_in_cash"
+                input_nc = {
+                    "net_cash_from_operating_activities": operating,
+                    "net_cash_from_investing_activities": investing,
+                    "net_cash_from_financing_activities": financing,
+                    "effect_of_exchange_rate_changes": exchange_effect,
+                    "net_change_in_cash": net_change,
+                }
+                msg_pass = f"Net change in cash verified: {operating} + {investing} + {financing} + {exchange_effect} = {net_change}."
+                msg_fail = f"Net change in cash mismatch: {operating} + {investing} + {financing} + {exchange_effect} = {calc_nc} != reported {net_change} (variance: {var})."
+            else:
+                calc_nc = round(operating + investing + financing, 4)
+                var = round(calc_nc - net_change, 4)
+                formula_nc = "net_cash_from_operating_activities + net_cash_from_investing_activities + net_cash_from_financing_activities == net_change_in_cash"
+                input_nc = {
+                    "net_cash_from_operating_activities": operating,
+                    "net_cash_from_investing_activities": investing,
+                    "net_cash_from_financing_activities": financing,
+                    "net_change_in_cash": net_change,
+                }
+                msg_pass = f"Net change in cash verified: {operating} + {investing} + {financing} = {net_change}."
+                msg_fail = f"Net change in cash mismatch: {operating} + {investing} + {financing} = {calc_nc} != reported {net_change} (variance: {var})."
+
             status = (
                 ValidationStatus.PASS
                 if abs(var) <= tol
                 else ValidationStatus.FAILED
             )
-            msg = (
-                f"Net change in cash verified: {operating} + {investing} + {financing} = {net_change}."
-                if status == ValidationStatus.PASS
-                else f"Net change in cash mismatch: {operating} + {investing} + {financing} = {calc_nc} != reported {net_change} (variance: {var})."
-            )
+            msg = msg_pass if status == ValidationStatus.PASS else msg_fail
             checks.append(
                 ValidationCheckResult(
                     rule_name="cash_flow_net_change_calculation",
-                    formula="net_cash_from_operating_activities + net_cash_from_investing_activities + net_cash_from_financing_activities == net_change_in_cash",
-                    input_values={
-                        "net_cash_from_operating_activities": operating,
-                        "net_cash_from_investing_activities": investing,
-                        "net_cash_from_financing_activities": financing,
-                        "net_change_in_cash": net_change,
-                    },
+                    formula=formula_nc,
+                    input_values=input_nc,
                     calculated_value=calc_nc,
                     reported_value=net_change,
                     variance=var,

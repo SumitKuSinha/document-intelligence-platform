@@ -132,19 +132,53 @@ class TextExtractionService:
                         f"Page {page_data.page_number} contained no digital text; extracted via OCR."
                     )
                 else:
-                    # Blank page or non-extractable content
-                    pages.append(
-                        ExtractedPage(
-                            page_number=page_data.page_number,
-                            text="",
-                            image_bytes=None,
-                            mime_type=None,
-                            is_scanned=False,
+                    # Page has no usable digital text and no embedded images.
+                    # Attempt robust page rasterization / rendering fallback (e.g. for vector-drawn PDFs).
+                    rendered_bytes = None
+                    try:
+                        rendered_bytes = PDFTextService.render_page(content, page_data.page_number)
+                    except Exception as render_exc:
+                        warnings.append(
+                            f"Page {page_data.page_number} rasterization attempt failed: {render_exc}"
                         )
-                    )
-                    warnings.append(
-                        f"Page {page_data.page_number} contains no extractable digital text or images."
-                    )
+
+                    if rendered_bytes:
+                        # Successfully rendered page; send through existing OCR/Vision pipeline
+                        extracted_ocr = ""
+                        try:
+                            extracted_ocr = OCRService.extract_text_from_image(rendered_bytes)
+                        except OCRError as ocr_err:
+                            errors.append(
+                                f"OCR failed for rendered page {page_data.page_number}: {ocr_err}"
+                            )
+
+                        pages.append(
+                            ExtractedPage(
+                                page_number=page_data.page_number,
+                                text=extracted_ocr,
+                                image_bytes=rendered_bytes,
+                                mime_type="image/png",
+                                is_scanned=True,
+                            )
+                        )
+                        warnings.append(
+                            f"Page {page_data.page_number} contained no digital text or embedded images; "
+                            f"rasterized page image for OCR/Vision extraction."
+                        )
+                    else:
+                        # Blank page or non-renderable content
+                        pages.append(
+                            ExtractedPage(
+                                page_number=page_data.page_number,
+                                text="",
+                                image_bytes=None,
+                                mime_type=None,
+                                is_scanned=False,
+                            )
+                        )
+                        warnings.append(
+                            f"Page {page_data.page_number} contains no extractable digital text, images, or renderable content."
+                        )
 
         # 4. Process raster image documents (PNG, JPG/JPEG)
         elif file_type in ("png", "jpeg"):

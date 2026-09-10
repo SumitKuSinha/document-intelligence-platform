@@ -1,12 +1,14 @@
 """
 PDF Text Extraction Service
 
-Extracts digital text and extracts embedded raster images page-by-page from PDF files using pypdf.
+Extracts digital text and embedded raster images page-by-page from PDF files using pypdf,
+with a robust PyMuPDF (fitz) page rasterization fallback for pages containing vector graphics,
+flattened drawings, or non-extractable content.
 """
 
 from dataclasses import dataclass, field
 from io import BytesIO
-from typing import List
+from typing import List, Optional
 
 import pypdf
 
@@ -29,8 +31,45 @@ class PDFPageData:
 
 class PDFTextService:
     """
-    Service for extracting digital text and embedded images from PDF documents.
+    Service for extracting digital text and embedded images from PDF documents,
+    with page rasterization fallback for vector-based or non-extractable pages.
     """
+
+    DEFAULT_RENDER_DPI: int = 200
+
+    @classmethod
+    def render_page(
+        cls,
+        content: bytes,
+        page_number: int,
+        dpi: int = DEFAULT_RENDER_DPI,
+    ) -> Optional[bytes]:
+        """
+        Rasterize/render a single PDF page to a PNG image using PyMuPDF.
+
+        Args:
+            content: Raw binary content of the PDF file.
+            page_number: 1-indexed page number.
+            dpi: Resolution for rasterization (default: 200 DPI).
+
+        Returns:
+            Optional[bytes]: PNG image bytes, or None if rendering fails.
+        """
+        try:
+            try:
+                import pymupdf
+            except ImportError:
+                import fitz as pymupdf
+
+            doc = pymupdf.open(stream=content, filetype="pdf")
+            if page_number < 1 or page_number > len(doc):
+                return None
+
+            page = doc[page_number - 1]
+            pix = page.get_pixmap(dpi=dpi)
+            return pix.tobytes("png")
+        except Exception:
+            return None
 
     @classmethod
     def extract_pages(cls, content: bytes) -> List[PDFPageData]:

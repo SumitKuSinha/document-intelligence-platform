@@ -72,6 +72,18 @@ def create_scanned_image_pdf(text_description: str = "scanned receipt") -> bytes
     return buf.getvalue()
 
 
+def create_vector_pdf() -> bytes:
+    """Create a PDF with vector paths but no digital text and no embedded raster images."""
+    try:
+        import pymupdf
+    except ImportError:
+        import fitz as pymupdf
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=300)
+    page.draw_rect(pymupdf.Rect(50, 50, 200, 200), color=(1, 0, 0), fill=(0, 1, 0))
+    return doc.tobytes()
+
+
 class TestTextExtractionService(unittest.TestCase):
     """Test suite for TextExtractionService, PDFTextService, and OCRService."""
 
@@ -261,6 +273,61 @@ class TestTextExtractionService(unittest.TestCase):
                 test_img = Image.new("RGB", (100, 40), color="white")
                 text = OCRService.extract_text_from_image(test_img)
                 self.assertIsInstance(text, str)
+
+    # --- PDF Rasterization Fallback Tests ---
+
+    def test_pdf_rasterization_fallback(self) -> None:
+        """Verify that a PDF with no digital text and no embedded images triggers page rasterization."""
+        expected_ocr_text = "Consolidated Statement Form 10-K\nTotal Operating Revenue: $1,250,000"
+        OCRService.set_ocr_engine(lambda img: expected_ocr_text)
+
+        vector_pdf = create_vector_pdf()
+        result = TextExtractionService.extract_text(vector_pdf, filename="vector_statement.pdf")
+
+        self.assertEqual(result.extraction_status, "SUCCESS")
+        self.assertEqual(len(result.pages), 1)
+        page = result.pages[0]
+        self.assertEqual(page.page_number, 1)
+        self.assertEqual(page.text, expected_ocr_text)
+        self.assertTrue(page.is_scanned)
+        self.assertIsNotNone(page.image_bytes)
+        self.assertEqual(page.mime_type, "image/png")
+        self.assertTrue(any("rasterized page image" in w for w in result.warnings))
+
+    def test_pdf_rasterization_failure_handling(self) -> None:
+        """Verify graceful degradation when page rasterization fails."""
+        from unittest.mock import patch
+        vector_pdf = create_vector_pdf()
+
+        with patch("app.services.pdf_text_service.PDFTextService.render_page", return_value=None):
+            result = TextExtractionService.extract_text(vector_pdf, filename="failed_raster.pdf")
+
+        self.assertEqual(len(result.pages), 1)
+        page = result.pages[0]
+        self.assertEqual(page.page_number, 1)
+        self.assertEqual(page.text, "")
+        self.assertFalse(page.is_scanned)
+        self.assertIsNone(page.image_bytes)
+        self.assertTrue(any("no extractable digital text, images, or renderable content" in w for w in result.warnings))
+
+    def test_pdf_text_service_render_page_direct(self) -> None:
+        """Verify direct operation of PDFTextService.render_page."""
+        from app.services.pdf_text_service import PDFTextService
+        vector_pdf = create_vector_pdf()
+
+        # Valid page
+        png_bytes = PDFTextService.render_page(vector_pdf, page_number=1, dpi=100)
+        self.assertIsNotNone(png_bytes)
+        self.assertTrue(png_bytes.startswith(b"\x89PNG"))
+
+        # Invalid page number (out of bounds)
+        out_of_bounds = PDFTextService.render_page(vector_pdf, page_number=99)
+        self.assertIsNone(out_of_bounds)
+
+        # Invalid content
+        invalid_render = PDFTextService.render_page(b"corrupt pdf", page_number=1)
+        self.assertIsNone(invalid_render)
+
 
 
 if __name__ == "__main__":
