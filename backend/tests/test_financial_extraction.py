@@ -601,6 +601,38 @@ class TestFinancialExtractionService(unittest.TestCase):
         cleaned_plain = LLMClient._clean_json_text(raw_fence_plain)
         self.assertEqual(cleaned_plain, '{"test": 456}')
 
+    def test_gemini_fallback_on_quota_exhaustion(self):
+        """Verify LLMClient fails over to available fallback model when quota limit is reached."""
+        from unittest.mock import MagicMock, patch
+        from google.genai import errors as g_errors
+
+        mock_client = MagicMock()
+        models_called = []
+
+        def mock_generate(model, contents, config):
+            models_called.append(model)
+            if model == "gemini-3.6-flash":
+                raise g_errors.APIError(429, {
+                    "error": {
+                        "code": 429,
+                        "message": "Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests. Please retry in 45s.",
+                        "status": "RESOURCE_EXHAUSTED"
+                    }
+                })
+            res = MagicMock()
+            res.text = '{"invoice_number": "INV-100", "total_amount": 500.0}'
+            return res
+
+        mock_client.models.generate_content.side_effect = mock_generate
+
+        with patch.object(LLMClient, "_create_gemini_client", return_value=mock_client):
+            with patch.dict("os.environ", {"LLM_MODEL": "gemini-3.6-flash"}):
+                result = LLMClient._generate_gemini("sys", "user")
+                self.assertEqual(result["invoice_number"], "INV-100")
+                self.assertEqual(result["total_amount"], 500.0)
+                self.assertIn("gemini-3.6-flash", models_called)
+                self.assertIn("gemini-3.7-flash", models_called)
+
     def test_unsupported_provider_raises_error(self):
         """Verify error is raised when an unknown LLM provider is configured."""
         import os

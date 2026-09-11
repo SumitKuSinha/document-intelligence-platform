@@ -34,6 +34,65 @@ class DocumentProcessingService:
     }
 
     @classmethod
+    def reconcile_document_type(cls, requested_type: str, text: str) -> str:
+        """
+        Reconcile the requested document type against the actual semantic content
+        of the extracted text (without using filename or vendor-specific heuristics).
+
+        If a user/client sends default 'invoice', but the text explicitly reports
+        a Balance Sheet, Profit & Loss, or Cash Flow Statement, route it to the
+        matching financial statement type.
+        """
+        if not text:
+            return requested_type
+
+        text_upper = text[:4000].upper()
+
+        is_bs = any(h in text_upper for h in [
+            "BALANCE SHEET",
+            "CONSOLIDATED BALANCE SHEET",
+            "STATEMENT OF FINANCIAL POSITION",
+            "STATEMENT OF ASSETS AND LIABILITIES",
+            "CAPITAL AND LIABILITIES",
+        ])
+        is_pnl = any(h in text_upper for h in [
+            "PROFIT AND LOSS",
+            "PROFIT & LOSS",
+            "STATEMENT OF PROFIT AND LOSS",
+            "INCOME STATEMENT",
+            "STATEMENT OF OPERATIONS",
+            "STATEMENT OF EARNINGS",
+            "STATEMENT OF COMPREHENSIVE INCOME",
+        ])
+        is_cf = any(h in text_upper for h in [
+            "CASH FLOW STATEMENT",
+            "STATEMENT OF CASH FLOWS",
+            "CASH FLOWS STATEMENT",
+        ])
+        is_inv = any(h in text_upper for h in [
+            "TAX INVOICE",
+            "COMMERCIAL INVOICE",
+            "BILL OF SUPPLY",
+            "PROFORMA INVOICE",
+            "INVOICE NUMBER",
+            "INVOICE DATE",
+            "BILL TO",
+            "SHIP TO",
+            "GSTIN",
+        ])
+
+        if is_bs and not is_inv:
+            return "balance_sheet"
+        if is_pnl and not is_inv:
+            return "profit_and_loss"
+        if is_cf and not is_inv:
+            return "cash_flow_statement"
+        if is_inv and not is_bs and not is_pnl and not is_cf:
+            return "invoice"
+
+        return requested_type
+
+    @classmethod
     def process_document(
         cls,
         file_bytes: bytes,
@@ -76,6 +135,7 @@ class DocumentProcessingService:
         # Step 2: Text / OCR Extraction
         text_result = TextExtractionService.extract_text(file_bytes, filename)
         full_text = "\n\n".join(p.text for p in text_result.pages if p.text).strip()
+        doc_type_clean = cls.reconcile_document_type(doc_type_clean, full_text)
         if text_result.extraction_status == "FAILED" or not full_text:
             diag = {
                 "extraction_status": text_result.extraction_status,

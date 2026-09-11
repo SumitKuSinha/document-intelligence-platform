@@ -33,18 +33,43 @@ class FieldEvidence(BaseModel):
 
 
 class InvoiceLineItem(BaseModel):
-    """Individual line item from an invoice."""
+    """Individual line item from an invoice with explicit generic accounting semantics."""
 
     model_config = ConfigDict(populate_by_name=True)
 
     description: Optional[str] = None
     quantity: Optional[float] = None
     unit_price: Optional[float] = None
-    total_price: Optional[float] = None
+    discount_percent: Optional[float] = Field(
+        default=None,
+        validation_alias=AliasChoices("discount_percent", "discount_pct", "discount_rate"),
+        description="Explicit percentage discount on the line item",
+    )
+    discount_amount: Optional[float] = Field(
+        default=None,
+        validation_alias=AliasChoices("discount_amount", "discount_value", "discount"),
+        description="Explicit monetary discount amount on the line item",
+    )
+    tax_rate: Optional[float] = Field(
+        default=None,
+        description="Line-item statutory tax rate (e.g. 0.18 for 18%)",
+    )
+    tax_amount: Optional[float] = Field(
+        default=None,
+        description="Line-item statutory tax amount if reported",
+    )
+    total_price: Optional[float] = Field(
+        default=None,
+        description="Net or reported line total (quantity * unit_price [- discount])",
+    )
     gross_amount: Optional[float] = Field(
         default=None,
         validation_alias=AliasChoices("gross_amount", "gross_total", "gross_worth"),
         description="Gross / post-tax line total (Gross worth) including tax if present",
+    )
+    is_tax_inclusive: Optional[bool] = Field(
+        default=None,
+        description="True if unit_price / total_price includes tax",
     )
     item_code: Optional[str] = None
     source_snippet: Optional[str] = None
@@ -66,7 +91,7 @@ class FinancialLineItem(BaseModel):
 # ---------------------------------------------------------------------------
 
 class InvoiceExtractionData(BaseModel):
-    """Structured extraction payload for invoice documents."""
+    """Structured extraction payload for invoice documents with generic accounting semantics."""
 
     invoice_number: Optional[str] = None
     invoice_date: Optional[str] = None
@@ -77,12 +102,48 @@ class InvoiceExtractionData(BaseModel):
     vendor_tax_id: Optional[str] = None
     customer_name: Optional[str] = None
     customer_address: Optional[str] = None
-    subtotal: Optional[float] = None
-    tax_amount: Optional[float] = None
-    tax_rate: Optional[float] = None
-    discount_amount: Optional[float] = None
+    pricing_type: Optional[str] = Field(
+        default=None,
+        description="Pricing model: 'tax_exclusive' (net line totals + tax = total) or 'tax_inclusive' (gross line totals include tax)",
+    )
+    subtotal: Optional[float] = Field(
+        default=None,
+        description="Pre-tax / net subtotal (sum of net line totals) or taxable base",
+    )
+    taxable_amount: Optional[float] = Field(
+        default=None,
+        description="Explicit taxable base/value if reported separately from subtotal",
+    )
+    tax_amount: Optional[float] = Field(
+        default=None,
+        description="Total tax amount",
+    )
+    tax_rate: Optional[float] = Field(
+        default=None,
+        description="Effective overall tax rate (e.g. 0.18 for 18%)",
+    )
+    tax_components: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Explicit breakdown of statutory tax components (e.g. CGST, SGST, IGST, VAT, CESS)",
+    )
+    discount_amount: Optional[float] = Field(
+        default=None,
+        description="Total monetary discount (order-level or total discount summary)",
+    )
+    discount_scope: Optional[str] = Field(
+        default=None,
+        description="'invoice_level' (deducted from subtotal) or 'line_item_summary' (informational summary of line discounts)",
+    )
     shipping_amount: Optional[float] = None
-    total_amount: Optional[float] = None
+    round_off_amount: Optional[float] = Field(
+        default=None,
+        validation_alias=AliasChoices("round_off_amount", "round_off", "rounding"),
+        description="Explicit round-off adjustment added/subtracted to reach final total",
+    )
+    total_amount: Optional[float] = Field(
+        default=None,
+        description="Final gross amount payable (Grand Total)",
+    )
     currency: Optional[str] = None
     payment_terms: Optional[str] = None
     line_items: List[InvoiceLineItem] = Field(default_factory=list)
@@ -90,7 +151,9 @@ class InvoiceExtractionData(BaseModel):
 
 
 class BalanceSheetExtractionData(BaseModel):
-    """Structured extraction payload for balance sheet documents."""
+    """Structured extraction payload for balance sheet documents with generic accounting semantics."""
+
+    model_config = ConfigDict(populate_by_name=True)
 
     company_name: Optional[str] = None
     statement_date: Optional[str] = None
@@ -103,9 +166,20 @@ class BalanceSheetExtractionData(BaseModel):
     non_current_liabilities: Optional[float] = None
     total_liabilities: Optional[float] = None
     retained_earnings: Optional[float] = None
-    share_capital: Optional[float] = None
+    share_capital: Optional[float] = Field(
+        default=None,
+        validation_alias=AliasChoices("share_capital", "capital", "equity_capital"),
+    )
     total_equity: Optional[float] = None
-    total_liabilities_and_equity: Optional[float] = None
+    total_liabilities_and_equity: Optional[float] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "total_liabilities_and_equity",
+            "total_capital_and_liabilities",
+            "total_equity_and_liabilities",
+            "total_capital_liabilities",
+        ),
+    )
     line_items: List[FinancialLineItem] = Field(default_factory=list)
     additional_fields: Dict[str, Any] = Field(default_factory=dict)
 

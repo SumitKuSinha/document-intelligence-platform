@@ -11,6 +11,8 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -56,6 +58,29 @@ class LLMClient:
     Supports Google Gemini 2.5 Flash (default) and OpenAI-compatible backends.
     """
 
+    GEMINI_FLASH_MODELS: List[str] = [
+        "gemini-3.6-flash",
+        "gemini-3.7-flash",
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
+        "gemini-3-flash",
+    ]
+
+    GEMINI_FLASH_LITE_MODELS: List[str] = [
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+    ]
+
+    GEMINI_FALLBACK_MODELS: List[str] = [
+        "gemini-3.6-flash",
+        "gemini-3.7-flash",
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
+        "gemini-3-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+    ]
+
     _mock_responder: Optional[Callable[..., Dict[str, Any]]] = None
 
     @classmethod
@@ -85,6 +110,125 @@ class LLMClient:
         return os.getenv("LLM_MODEL", "gpt-4o-mini")
 
     @classmethod
+    def get_gemini_candidate_models(cls, primary_model: Optional[str] = None) -> List[str]:
+        """
+        Return ordered Gemini model candidates for generation and fallback.
+
+        Ordering Rules:
+        1. Regular Flash models are always prioritized first.
+        2. Flash Lite models are only used as the fallback pool after regular Flash models are exhausted.
+        3. Flash Lite should NOT be the primary model while regular Flash models are available.
+        4. If a primary Flash model is configured, it is attempted first among regular Flash models.
+        """
+        if not primary_model:
+            primary_model = cls.get_model()
+
+        is_lite = bool(primary_model and "lite" in primary_model.lower())
+
+        flash_candidates: List[str] = []
+        if not is_lite and primary_model:
+            flash_candidates.append(primary_model)
+        for m in cls.GEMINI_FLASH_MODELS:
+            if m not in flash_candidates:
+                flash_candidates.append(m)
+
+        lite_candidates: List[str] = []
+        if is_lite and primary_model:
+            lite_candidates.append(primary_model)
+        for m in cls.GEMINI_FLASH_LITE_MODELS:
+            if m not in lite_candidates:
+                lite_candidates.append(m)
+
+        return flash_candidates + lite_candidates
+
+    @classmethod
+    def _sanitize_log_message(cls, message: Optional[str]) -> str:
+        """
+        Redact sensitive information such as GEMINI_API_KEY and GOOGLE_API_KEY from log messages and errors.
+        """
+        if not message:
+            return ""
+        sanitized = str(message)
+        for env_var in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"):
+            val = os.getenv(env_var)
+            if val and len(val.strip()) > 3:
+                sanitized = sanitized.replace(val.strip(), "[REDACTED_API_KEY]")
+
+        # Redact Google API key patterns and URL/Bearer credentials
+        sanitized = re.sub(r"AIza[0-9A-Za-z\-_]{35}", "[REDACTED_API_KEY]", sanitized)
+        sanitized = re.sub(r"(key=)[A-Za-z0-9\-_]+", r"\1[REDACTED_API_KEY]", sanitized)
+        sanitized = re.sub(r"(Bearer\s+)[A-Za-z0-9\-_.]+", r"\1[REDACTED_API_KEY]", sanitized)
+        return sanitized
+
+    @classmethod
+    def _is_quota_exhausted_error(cls, err: Exception) -> bool:
+        """Check if an error represents daily quota exhaustion or 429 quota limit."""
+        err_str = str(err).lower()
+        code = getattr(err, "code", None)
+        if code == 429:
+            return True
+        quota_keywords = [
+            "429",
+            "generaterequestsperday",
+            "generate_content_free_tier_requests",
+            "quota exceeded",
+            "quota_exceeded",
+            "daily quota",
+            "per_day",
+            "per day",
+            "perday",
+            "resource_exhausted",
+            "check quota",
+            "insufficient_quota",
+            "quota limit",
+            "exceeded quota",
+        ]
+        return any(k in err_str for k in quota_keywords)
+
+    @classmethod
+    def _is_unsupported_or_not_found_error(cls, err: Exception) -> bool:
+        """Check if an error indicates that Google rejected a model as unsupported or not found."""
+        err_str = str(err).lower()
+        code = getattr(err, "code", None)
+        if code == 404:
+            return True
+        not_found_keywords = [
+            "not found",
+            "not_found",
+            "404",
+            "unsupported",
+            "is not supported",
+            "model not found",
+            "unknown model",
+            "does not exist",
+            "is not found",
+            "invalid model",
+            "not supported for",
+        ]
+        return any(k in err_str for k in not_found_keywords)
+
+    @classmethod
+    def _is_transient_service_error(cls, err: Exception) -> bool:
+        """Check if an error is a transient service error (503 / 502 / 504 / service unavailable)."""
+        err_str = str(err).lower()
+        code = getattr(err, "code", None)
+        if code in (500, 502, 503, 504):
+            return True
+        transient_keywords = [
+            "503",
+            "502",
+            "504",
+            "unavailable",
+            "service unavailable",
+            "temporarily unavailable",
+            "timeout",
+            "deadline exceeded",
+            "connection reset",
+            "server error",
+        ]
+        return any(k in err_str for k in transient_keywords)
+
+    @classmethod
     def get_temperature(cls) -> float:
         """Return the sampling temperature (default 0.0 for deterministic extraction)."""
         try:
@@ -110,7 +254,8 @@ class LLMClient:
         try:
             return genai.Client(api_key=api_key)
         except Exception as exc:
-            raise LLMClientError(f"Failed to initialize Google Gemini client: {exc}") from exc
+            safe_exc = cls._sanitize_log_message(str(exc))
+            raise LLMClientError(f"Failed to initialize Google Gemini client: {safe_exc}") from exc
 
     @classmethod
     def _create_openai_client(cls) -> Any:
@@ -179,17 +324,16 @@ class LLMClient:
             else:
                 contents = user_prompt
 
-            # Resilient multi-model retry loop for transient demand spikes (503 / 429)
-            model_candidates = [model_name]
-            for fallback in ["gemini-3.7-flash", "gemini-3.5-flash"]:
-                if fallback not in model_candidates:
-                    model_candidates.append(fallback)
+            # Multi-model fallback loop prioritizing regular Flash models first, then Flash Lite
+            model_candidates = cls.get_gemini_candidate_models(model_name)
 
             response = None
             last_exc = None
 
-            for active_model in model_candidates:
+            for idx, active_model in enumerate(model_candidates):
                 max_attempts = 3
+                fallback_reason = None
+
                 for attempt in range(1, max_attempts + 1):
                     try:
                         response = client.models.generate_content(
@@ -201,29 +345,63 @@ class LLMClient:
                     except Exception as call_err:
                         last_exc = call_err
                         err_str = str(call_err).lower()
-                        if "generaterequestsperday" in err_str:
-                            logger.warning(f"{active_model} daily quota exceeded. Trying fallback model.")
+
+                        # 1. Model unsupported or not found (404 / NotFound) -> graceful immediate fallback
+                        if cls._is_unsupported_or_not_found_error(call_err):
+                            fallback_reason = f"Model unsupported or not found (404): {cls._sanitize_log_message(str(call_err))}"
                             break
-                        if ("503" in err_str or "unavailable" in err_str or "429" in err_str or "resource_exhausted" in err_str) and attempt < max_attempts:
-                            import re
-                            import time
-                            wait_match = re.search(r"retry in (\d+(?:\.\d+)?)s", str(call_err), re.IGNORECASE)
-                            if wait_match:
-                                sleep_sec = min(float(wait_match.group(1)) + 2.0, 75.0)
+
+                        # 2. Daily quota exhaustion / 429 quota error -> immediately fallback without wasting retries
+                        if cls._is_quota_exhausted_error(call_err):
+                            fallback_reason = f"Daily quota exhaustion / 429 quota error: {cls._sanitize_log_message(str(call_err))}"
+                            break
+
+                        # 3. Check for retry delay in transient/rate limit errors
+                        wait_match = re.search(r"retry in (\d+(?:\.\d+)?)s", str(call_err), re.IGNORECASE)
+                        retry_wait = float(wait_match.group(1)) if wait_match else 0.0
+
+                        # If retry delay is too large (> 10s) and fallback candidates remain, retrying is not useful
+                        if retry_wait > 10.0 and (idx + 1) < len(model_candidates):
+                            fallback_reason = f"Rate limit delay requires {retry_wait:.1f}s delay; retrying not useful"
+                            break
+
+                        # 4. Transient 503 / service-unavailable error
+                        if cls._is_transient_service_error(call_err) or "429" in err_str:
+                            if attempt < max_attempts:
+                                sleep_sec = min(retry_wait + 2.0, 15.0) if retry_wait > 0 else 3.0 * attempt
+                                safe_err = cls._sanitize_log_message(str(call_err))
+                                logger.warning(
+                                    f"{active_model} transient error (attempt {attempt}/{max_attempts}). "
+                                    f"Backing off {sleep_sec:.1f}s: {safe_err}"
+                                )
+                                time.sleep(sleep_sec)
+                                continue
                             else:
-                                sleep_sec = 3.0 * attempt
-                            logger.warning(f"{active_model} transient error (attempt {attempt}/{max_attempts}). Backing off {sleep_sec:.1f}s: {call_err}")
-                            time.sleep(sleep_sec)
-                            continue
-                        if ("503" in err_str or "unavailable" in err_str or "429" in err_str):
-                            logger.warning(f"{active_model} exhausted retries. Trying fallback model.")
-                            break
+                                fallback_reason = f"Transient error retries exhausted ({max_attempts}/{max_attempts}): {cls._sanitize_log_message(str(call_err))}"
+                                break
+
+                        # Fatal / non-transient error: re-raise immediately
                         raise
+
                 if response is not None:
+                    # Successful model stops the fallback chain immediately
                     break
+
+                # active_model failed; log fallback transition
+                has_next = (idx + 1) < len(model_candidates)
+                next_model = model_candidates[idx + 1] if has_next else "None (all fallback models exhausted)"
+                safe_reason = cls._sanitize_log_message(fallback_reason or str(last_exc))
+                logger.warning(
+                    f"Fallback triggered: attempted model='{active_model}', "
+                    f"reason for fallback='{safe_reason}', "
+                    f"next model selected='{next_model}'"
+                )
 
             if response is None and last_exc is not None:
                 raise last_exc
+
+            if response is None:
+                raise LLMClientError("Gemini returned an empty response.")
 
             raw_text = response.text
             if not raw_text:
@@ -237,11 +415,14 @@ class LLMClient:
             return parsed_data
 
         except json.JSONDecodeError as exc:
-            raise LLMClientError(f"Failed to parse Gemini output as JSON: {exc}") from exc
+            safe_exc = cls._sanitize_log_message(str(exc))
+            raise LLMClientError(f"Failed to parse Gemini output as JSON: {safe_exc}") from exc
         except Exception as exc:
             if genai_errors and isinstance(exc, genai_errors.APIError):
-                raise LLMClientError(f"Gemini API error ({exc.code}): {exc.message}") from exc
-            raise LLMClientError(f"Gemini generation failed: {exc}") from exc
+                safe_msg = cls._sanitize_log_message(exc.message)
+                raise LLMClientError(f"Gemini API error ({exc.code}): {safe_msg}") from exc
+            safe_exc = cls._sanitize_log_message(str(exc))
+            raise LLMClientError(f"Gemini generation failed: {safe_exc}") from exc
 
     @classmethod
     def _generate_openai(
@@ -277,9 +458,11 @@ class LLMClient:
             return parsed_data
 
         except json.JSONDecodeError as exc:
-            raise LLMClientError(f"Failed to parse LLM output as JSON: {exc}") from exc
+            safe_exc = cls._sanitize_log_message(str(exc))
+            raise LLMClientError(f"Failed to parse LLM output as JSON: {safe_exc}") from exc
         except Exception as exc:
-            raise LLMClientError(f"OpenAI generation failed: {exc}") from exc
+            safe_exc = cls._sanitize_log_message(str(exc))
+            raise LLMClientError(f"OpenAI generation failed: {safe_exc}") from exc
 
     @classmethod
     def generate_json(
