@@ -8,6 +8,10 @@ flattened drawings, or non-extractable content.
 
 from dataclasses import dataclass, field
 from io import BytesIO
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 from typing import List, Optional
 
 import pypdf
@@ -38,14 +42,15 @@ class PDFTextService:
     DEFAULT_RENDER_DPI: int = 200
 
     @classmethod
-    def render_page(
+    def _render_page_pdftoppm(
         cls,
         content: bytes,
         page_number: int,
         dpi: int = DEFAULT_RENDER_DPI,
     ) -> Optional[bytes]:
         """
-        Rasterize/render a single PDF page to a PNG image using PyMuPDF.
+        Secondary rasterization fallback using pdftoppm (poppler-utils) CLI
+        when PyMuPDF is unavailable or encounters an unrenderable stream.
 
         Args:
             content: Raw binary content of the PDF file.
@@ -55,6 +60,68 @@ class PDFTextService:
         Returns:
             Optional[bytes]: PNG image bytes, or None if rendering fails.
         """
+        pdftoppm_bin = shutil.which("pdftoppm")
+        if not pdftoppm_bin or not content:
+            return None
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp_pdf = Path(tmp_dir) / "document.pdf"
+                tmp_pdf.write_bytes(content)
+                out_prefix = Path(tmp_dir) / "page"
+
+                cmd = [
+                    pdftoppm_bin,
+                    "-png",
+                    "-r",
+                    str(dpi),
+                    "-f",
+                    str(page_number),
+                    "-l",
+                    str(page_number),
+                    str(tmp_pdf),
+                    str(out_prefix),
+                ]
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=30,
+                    check=False,
+                )
+                if proc.returncode != 0:
+                    return None
+
+                generated_files = sorted(Path(tmp_dir).glob("page-*.png"))
+                if generated_files:
+                    return generated_files[0].read_bytes()
+                return None
+        except Exception:
+            return None
+
+    @classmethod
+    def render_page(
+        cls,
+        content: bytes,
+        page_number: int,
+        dpi: int = DEFAULT_RENDER_DPI,
+    ) -> Optional[bytes]:
+        """
+        Rasterize/render a single PDF page to a PNG image using PyMuPDF,
+        with a robust Poppler (pdftoppm) secondary fallback.
+
+        Args:
+            content: Raw binary content of the PDF file.
+            page_number: 1-indexed page number.
+            dpi: Resolution for rasterization (default: 200 DPI).
+
+        Returns:
+            Optional[bytes]: PNG image bytes, or None if rendering fails.
+        """
+        if not content or page_number < 1:
+            return None
+
+        # 1. Primary rasterizer: PyMuPDF (fitz)
         try:
             try:
                 import pymupdf
@@ -62,12 +129,20 @@ class PDFTextService:
                 import fitz as pymupdf
 
             doc = pymupdf.open(stream=content, filetype="pdf")
-            if page_number < 1 or page_number > len(doc):
+            if page_number <= len(doc):
+                page = doc[page_number - 1]
+                pix = page.get_pixmap(dpi=dpi)
+                rendered = pix.tobytes("png")
+                if rendered:
+                    return rendered
+            else:
                 return None
+        except Exception:
+            pass
 
-            page = doc[page_number - 1]
-            pix = page.get_pixmap(dpi=dpi)
-            return pix.tobytes("png")
+        # 2. Secondary rasterizer fallback: pdftoppm (poppler-utils)
+        try:
+            return cls._render_page_pdftoppm(content, page_number, dpi=dpi)
         except Exception:
             return None
 

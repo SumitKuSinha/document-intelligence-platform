@@ -8,10 +8,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TESSERACT_CMD=/usr/bin/tesseract \
     PYTHONPATH=/app/backend
 
-# Install system dependencies including Tesseract OCR engine and English language pack
+# Install system dependencies including Tesseract OCR engine, English language pack, and Poppler utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
+    poppler-utils \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

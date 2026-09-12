@@ -328,6 +328,44 @@ class TestTextExtractionService(unittest.TestCase):
         invalid_render = PDFTextService.render_page(b"corrupt pdf", page_number=1)
         self.assertIsNone(invalid_render)
 
+    def test_pdf_text_service_render_page_poppler_fallback(self) -> None:
+        """Verify secondary fallback to pdftoppm when PyMuPDF encounters an error."""
+        from unittest.mock import patch
+        from app.services.pdf_text_service import PDFTextService
+        vector_pdf = create_vector_pdf()
+
+        fake_png = b"\x89PNG\r\n\x1a\nfake_poppler_png_bytes"
+        with patch("pymupdf.open", side_effect=Exception("MuPDF internal rendering failure")), \
+             patch.object(PDFTextService, "_render_page_pdftoppm", return_value=fake_png) as mock_poppler:
+            rendered = PDFTextService.render_page(vector_pdf, page_number=1)
+            self.assertEqual(rendered, fake_png)
+            mock_poppler.assert_called_once_with(vector_pdf, 1, dpi=PDFTextService.DEFAULT_RENDER_DPI)
+
+    def test_sample_profit_and_loss_rasterization(self) -> None:
+        """Verify that sample Profit & Loss PDF rasterizes and extracts text/image properly."""
+        sample_path = Path(__file__).resolve().parents[2] / "sample_outputs" / "Profit & Loss" / "Consolidated Profit & Loss 2023.pdf"
+        if not sample_path.exists():
+            self.skipTest("Sample Profit & Loss PDF not found in repository")
+
+        pdf_bytes = sample_path.read_bytes()
+        from app.services.pdf_text_service import PDFTextService
+        rendered = PDFTextService.render_page(pdf_bytes, page_number=1)
+        self.assertIsNotNone(rendered)
+        self.assertTrue(rendered.startswith(b"\x89PNG"))
+
+        # Test through full TextExtractionService with mock OCR to verify pipeline
+        mock_ocr = "Consolidated Profit and Loss Account\nInterest Earned: $170,754"
+        OCRService.set_ocr_engine(lambda img: mock_ocr)
+        result = TextExtractionService.extract_text(pdf_bytes, filename=sample_path.name)
+        self.assertEqual(result.extraction_status, "SUCCESS")
+        self.assertEqual(len(result.pages), 1)
+        page = result.pages[0]
+        self.assertEqual(page.page_number, 1)
+        self.assertTrue(page.is_scanned)
+        self.assertEqual(page.text, mock_ocr)
+        self.assertIsNotNone(page.image_bytes)
+        self.assertEqual(page.mime_type, "image/png")
+        self.assertTrue(any("rasterized page image" in w for w in result.warnings))
 
 
 if __name__ == "__main__":
